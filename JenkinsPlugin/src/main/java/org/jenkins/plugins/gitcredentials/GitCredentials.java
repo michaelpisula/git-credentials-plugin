@@ -1,6 +1,7 @@
 package org.jenkins.plugins.gitcredentials;
 
 import hudson.Extension;
+import hudson.FilePath;
 import hudson.Launcher;
 import hudson.model.BuildListener;
 import hudson.model.Describable;
@@ -9,6 +10,7 @@ import hudson.model.Item;
 import hudson.model.Result;
 import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
+import hudson.model.Cause.UserIdCause;
 import hudson.model.Descriptor;
 import hudson.security.ACL;
 import hudson.tasks.BuildWrapper;
@@ -16,10 +18,6 @@ import hudson.tasks.BuildWrapperDescriptor;
 import hudson.util.ListBoxModel;
 
 import java.io.IOException;
-import java.io.OutputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.List;
 
@@ -36,20 +34,12 @@ import com.google.common.collect.Lists;
 
 public class GitCredentials extends BuildWrapper {
 
-	private User user;
-	private System system;
+	public final User user;
+	public final System system;
 
 	@DataBoundConstructor
 	public GitCredentials(User user, System system) {
 		this.user = user;
-		this.system = system;
-	}
-
-	public void setUser(User user) {
-		this.user = user;
-	}
-
-	public void setSystem(System system) {
 		this.system = system;
 	}
 
@@ -67,16 +57,26 @@ public class GitCredentials extends BuildWrapper {
 		GitCredentialLogger logger = new GitCredentialLogger(listener);
 		List<SSHUserPrivateKey> keys = Lists.newLinkedList();
 		if (user != null) {
-			for (SSHUserPrivateKey u : CredentialsProvider.lookupCredentials(
-					SSHUserPrivateKey.class, (Item) null, hudson.model.User
-							.current().impersonate())) {
-				keys.add(u);
+
+			UserIdCause cause = (UserIdCause) build.getCause(UserIdCause.class);
+			if (cause == null) {
+				logger.error("Job must be started by a user for user credentials, will try system credentials");
+			} else {
+				hudson.model.User currentUser = hudson.model.User.get(cause
+						.getUserId());
+				for (SSHUserPrivateKey u : CredentialsProvider
+						.lookupCredentials(SSHUserPrivateKey.class,
+								(Item) null, currentUser.impersonate())) {
+					keys.add(u);
+				}
+				if (user.userFail && keys.isEmpty()) {
+					logger.error("No credentials found for user "
+							+ currentUser.getDisplayName());
+					build.setResult(Result.FAILURE);
+				}
 			}
-			if (user.userFail && keys.isEmpty()) {
-				logger.error("No credentials found for user "
-						+ hudson.model.User.current().getDisplayName());
-				build.setResult(Result.FAILURE);
-			}
+		} else {
+			logger.info("No user credential lookup configured");
 		}
 		if (system != null) {
 			for (SSHUserPrivateKey key : CredentialsProvider.lookupCredentials(
@@ -85,43 +85,21 @@ public class GitCredentials extends BuildWrapper {
 					keys.add(key);
 				}
 			}
+		} else {
+			logger.info("No system credential lookup configured");
 		}
 
 		if (keys.isEmpty()) {
 			logger.error("No usable credentials were found");
-			return super.setUp(build, launcher, listener);
+			return null;
 		}
-
 		SSHUserPrivateKey key = keys.get(0);
-
 		if (keys.size() > 1) {
 			logger.info("Found more than one usable credential, using credentials for username "
 					+ key.getUsername());
 		}
 
-		Path tempfile = Files.createTempFile("gitssh", "tmp");
-		Files.write(tempfile, key.getPrivateKey().getBytes());
-
-		Path gitSshFile = Paths.get(Jenkins.getInstance().getRootDir()
-				.getPath(), "userContent", "gitSSH.sh");
-		if (!Files.isExecutable(gitSshFile)) {
-			Files.deleteIfExists(gitSshFile);
-			OutputStream outputStream = null;
-			try {
-				outputStream = Files.newOutputStream(gitSshFile);
-			} finally {
-				if (outputStream != null)
-					outputStream.close();
-			}
-
-		}
-
-		EnvironmentList environments = build.getEnvironments();
-		hudson.model.Environment environment = environments.get(0);
-		HashMap<String, String> env = new HashMap<String, String>();
-		env.put("GIT_SSH", gitSshFile.toString());
-		environment.buildEnvVars(env);
-		return super.setUp(build, launcher, listener);
+		return createEnvironment(key, logger, build);
 	}
 
 	/**
@@ -134,6 +112,57 @@ public class GitCredentials extends BuildWrapper {
 	private static String description(SSHUser sshUser) {
 		return StringUtils.isEmpty(sshUser.getDescription()) ? sshUser
 				.getUsername() : sshUser.getDescription();
+	}
+
+	public GitCredentialEnvironment createEnvironment(SSHUserPrivateKey key,
+			GitCredentialLogger logger, AbstractBuild build) {
+
+		GitCredentialEnvironment result = new GitCredentialEnvironment();
+
+		FilePath userContent = Jenkins.getInstance().getRootPath()
+				.child("userContent");
+		result.tempFile = createAndWriteToTempFile(logger, userContent,
+				key.getPrivateKey(), "key");
+		result.gitSshFile = createAndWriteToTempFile(logger, userContent,
+				"#!/bin/bash\nssh -i " + result.tempFile.getRemote()
+						+ " \"$@\"", "gitSSH");
+
+		EnvironmentList environments = build.getEnvironments();
+		hudson.model.Environment environment = environments.get(0);
+		HashMap<String, String> env = new HashMap<String, String>();
+		env.put("GIT_SSH", result.gitSshFile.getRemote());
+		environment.buildEnvVars(env);
+
+		return result;
+	}
+
+	private FilePath createAndWriteToTempFile(GitCredentialLogger logger,
+			FilePath userContent, String content, String name) {
+		FilePath file;
+		try {
+
+			file = userContent.createTempFile(name, "sh");
+			file.write(content, "UTF-8");
+		} catch (Exception e1) {
+			logger.error("Could not create temp file " + name);
+			return null;
+		}
+		return file;
+	}
+
+	public class GitCredentialEnvironment extends Environment {
+
+		private FilePath tempFile;
+		private FilePath gitSshFile;
+
+		@Override
+		public boolean tearDown(AbstractBuild build, BuildListener listener)
+				throws IOException, InterruptedException {
+			tempFile.delete();
+			gitSshFile.delete();
+			return true;
+		}
+
 	}
 
 	/**
@@ -182,7 +211,7 @@ public class GitCredentials extends BuildWrapper {
 	}
 
 	public static class User implements Describable<User> {
-		private boolean userFail;
+		public final boolean userFail;
 
 		@DataBoundConstructor
 		public User(boolean userFail) {
@@ -206,7 +235,7 @@ public class GitCredentials extends BuildWrapper {
 	}
 
 	public static class System implements Describable<System> {
-		private String systemUser;
+		public String systemUser;
 
 		@DataBoundConstructor
 		public System(String systemUser) {
@@ -221,15 +250,15 @@ public class GitCredentials extends BuildWrapper {
 			return Jenkins.getInstance().getDescriptor(getClass());
 		}
 
-	}
+		@Extension
+		public static class SystemDecscriptorImpl extends Descriptor<System> {
 
-	@Extension
-	public static class SystemDecscriptorImpl extends Descriptor<System> {
+			@Override
+			public String getDisplayName() {
+				return "System";
+			}
 
-		@Override
-		public String getDisplayName() {
-			return "System";
 		}
-
 	}
+
 }

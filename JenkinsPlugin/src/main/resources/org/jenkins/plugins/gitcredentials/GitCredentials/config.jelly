@@ -2,7 +2,7 @@
 <j:jelly xmlns:j="jelly:core" xmlns:f="/lib/form">
      <f:block>
      <table>
-       <f:optionalBlock name="user" title="${%User}">
+       <f:optionalBlock inline="true" name="user" title="${%User}">
          <f:entry title="Fail if no user credentials found">
            <f:checkbox field="userFail"/>
          </f:entry>
@@ -11,7 +11,7 @@
    </f:block>
      <f:block>
      <table>
-       <f:optionalBlock name="system" title="${%System}">
+       <f:optionalBlock inline="true" name="system" title="${%System}">
          <f:entry title="${%Credentials}" field="systemUser">
     <f:select/>
   </f:entry>
