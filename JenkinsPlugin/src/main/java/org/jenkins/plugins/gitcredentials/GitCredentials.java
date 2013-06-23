@@ -5,13 +5,11 @@ import hudson.Extension;
 import hudson.FilePath;
 import hudson.Launcher;
 import hudson.model.BuildListener;
-import hudson.model.Describable;
 import hudson.model.Item;
 import hudson.model.Result;
 import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
 import hudson.model.Cause.UserIdCause;
-import hudson.model.Descriptor;
 import hudson.model.Run.RunnerAbortedException;
 import hudson.security.ACL;
 import hudson.tasks.BuildWrapper;
@@ -190,7 +188,7 @@ public class GitCredentials extends BuildWrapper {
 		 */
 		@Override
 		public boolean isApplicable(AbstractProject<?, ?> item) {
-			return true;
+			return item.getScm().getType().equals("GitSCM");
 		}
 
 		/**
@@ -221,57 +219,6 @@ public class GitCredentials extends BuildWrapper {
 			return m;
 		}
 
-	}
-
-	public static class User implements Describable<User> {
-		public final boolean userFail;
-
-		@DataBoundConstructor
-		public User(boolean userFail) {
-			this.userFail = userFail;
-		}
-
-		public boolean isUserFail() {
-			return userFail;
-		}
-
-		public Descriptor<User> getDescriptor() {
-			return new Descriptor<GitCredentials.User>() {
-
-				@Override
-				public String getDisplayName() {
-					return "User";
-				}
-			};
-		}
-
-	}
-
-	public static class System implements Describable<System> {
-		public String systemUser;
-
-		@DataBoundConstructor
-		public System(String systemUser) {
-			this.systemUser = systemUser;
-		}
-
-		public String getSystemUser() {
-			return systemUser;
-		}
-
-		public Descriptor<System> getDescriptor() {
-			return Jenkins.getInstance().getDescriptor(getClass());
-		}
-
-		@Extension
-		public static class SystemDecscriptorImpl extends Descriptor<System> {
-
-			@Override
-			public String getDisplayName() {
-				return "System";
-			}
-
-		}
 	}
 
 }
