@@ -1,24 +1,24 @@
 package org.jenkins.plugins.gitcredentials;
 
+import hudson.EnvVars;
 import hudson.Extension;
 import hudson.FilePath;
 import hudson.Launcher;
 import hudson.model.BuildListener;
 import hudson.model.Describable;
-import hudson.model.EnvironmentList;
 import hudson.model.Item;
 import hudson.model.Result;
 import hudson.model.AbstractBuild;
 import hudson.model.AbstractProject;
 import hudson.model.Cause.UserIdCause;
 import hudson.model.Descriptor;
+import hudson.model.Run.RunnerAbortedException;
 import hudson.security.ACL;
 import hudson.tasks.BuildWrapper;
 import hudson.tasks.BuildWrapperDescriptor;
 import hudson.util.ListBoxModel;
 
 import java.io.IOException;
-import java.util.HashMap;
 import java.util.List;
 
 import jenkins.model.Jenkins;
@@ -34,29 +34,49 @@ import com.google.common.collect.Lists;
 
 public class GitCredentials extends BuildWrapper {
 
-	public final User user;
-	public final System system;
+	public final boolean user;
+	public final boolean userFail;
+	public final boolean system;
+	public final String systemUser;
+	private transient GitCredentialLogger logger;
+	private transient GitCredentialEnvironment environment;
 
 	@DataBoundConstructor
-	public GitCredentials(User user, System system) {
+	public GitCredentials(boolean user, boolean userFail, boolean system,
+			String systemUser) {
 		this.user = user;
+		this.userFail = userFail;
 		this.system = system;
+		this.systemUser = systemUser;
 	}
 
-	public User getUser() {
-		return user;
-	}
+	@Override
+	public Launcher decorateLauncher(AbstractBuild build, Launcher launcher,
+			BuildListener listener) throws IOException, InterruptedException,
+			RunnerAbortedException {
+		logger = new GitCredentialLogger(listener);
 
-	public System getSystem() {
-		return system;
+		SSHUserPrivateKey key = getPrivateKey(build);
+
+		environment = createEnvironment(key, logger);
+
+		EnvVars envvar = new EnvVars();
+		envvar.put("GIT_SSH", environment.gitSshFile.getRemote());
+
+		return launcher.decorateByEnv(envvar);
 	}
 
 	@Override
 	public Environment setUp(AbstractBuild build, Launcher launcher,
 			BuildListener listener) throws IOException, InterruptedException {
-		GitCredentialLogger logger = new GitCredentialLogger(listener);
+		logger = new GitCredentialLogger(listener);
+
+		return environment;
+	}
+
+	private SSHUserPrivateKey getPrivateKey(AbstractBuild build) {
 		List<SSHUserPrivateKey> keys = Lists.newLinkedList();
-		if (user != null) {
+		if (user) {
 
 			UserIdCause cause = (UserIdCause) build.getCause(UserIdCause.class);
 			if (cause == null) {
@@ -69,7 +89,7 @@ public class GitCredentials extends BuildWrapper {
 								(Item) null, currentUser.impersonate())) {
 					keys.add(u);
 				}
-				if (user.userFail && keys.isEmpty()) {
+				if (userFail && keys.isEmpty()) {
 					logger.error("No credentials found for user "
 							+ currentUser.getDisplayName());
 					build.setResult(Result.FAILURE);
@@ -78,10 +98,10 @@ public class GitCredentials extends BuildWrapper {
 		} else {
 			logger.info("No user credential lookup configured");
 		}
-		if (system != null) {
+		if (system) {
 			for (SSHUserPrivateKey key : CredentialsProvider.lookupCredentials(
 					SSHUserPrivateKey.class, ACL.SYSTEM)) {
-				if (key.getId().equals(system.systemUser)) {
+				if (key.getId().equals(systemUser)) {
 					keys.add(key);
 				}
 			}
@@ -98,8 +118,7 @@ public class GitCredentials extends BuildWrapper {
 			logger.info("Found more than one usable credential, using credentials for username "
 					+ key.getUsername());
 		}
-
-		return createEnvironment(key, logger, build);
+		return key;
 	}
 
 	/**
@@ -115,7 +134,7 @@ public class GitCredentials extends BuildWrapper {
 	}
 
 	public GitCredentialEnvironment createEnvironment(SSHUserPrivateKey key,
-			GitCredentialLogger logger, AbstractBuild build) {
+			GitCredentialLogger logger) {
 
 		GitCredentialEnvironment result = new GitCredentialEnvironment();
 
@@ -127,12 +146,6 @@ public class GitCredentials extends BuildWrapper {
 				"#!/bin/bash\nssh -i " + result.tempFile.getRemote()
 						+ " \"$@\"", "gitSSH");
 
-		EnvironmentList environments = build.getEnvironments();
-		hudson.model.Environment environment = environments.get(0);
-		HashMap<String, String> env = new HashMap<String, String>();
-		env.put("GIT_SSH", result.gitSshFile.getRemote());
-		environment.buildEnvVars(env);
-
 		return result;
 	}
 
@@ -141,7 +154,7 @@ public class GitCredentials extends BuildWrapper {
 		FilePath file;
 		try {
 
-			file = userContent.createTempFile(name, "sh");
+			file = userContent.createTempFile(name, ".sh");
 			file.write(content, "UTF-8");
 		} catch (Exception e1) {
 			logger.error("Could not create temp file " + name);
